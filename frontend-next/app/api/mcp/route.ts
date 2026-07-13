@@ -24,6 +24,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod'
 import { sha256Hex, createRateLimiter, createIpRateLimiter, getClientIp } from '@/lib/api-auth'
 import { resolveTraceIdentity } from '@/lib/resolve-trace-identity'
+import { redactTraceInput } from '@/lib/redact-trace-input'
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL!
@@ -157,15 +158,27 @@ function buildMcpServer(userId: string): McpServer {
         }
         const { kind, agentId, agentName } = identity
 
+        // PII redaction — defense-in-depth at the MCP ingest boundary.
+        // /api/ingest and /api/events both redact free-text fields before
+        // persistence (see lib/redact-trace-input.ts for why); this was the
+        // one ingestion path that didn't. Any MCP client can call
+        // record_trace directly without going through the Python SDK's own
+        // redaction, so args/output/error must be scrubbed here too.
+        const { args, output, error } = redactTraceInput({
+          args: params.args,
+          output: params.output,
+          error: params.error,
+        })
+
         await supaRpc('upsert_trace_with_metrics', {
           p_id:            params.id,
           p_user_id:       userId,
           p_parent_id:     params.parent_id ?? null,
           p_function:      params.function,
-          p_args:          params.args    ?? '',
-          p_output:        params.output  ?? '',
+          p_args:          args,
+          p_output:        output,
           p_latency_sec:   params.latency_sec,
-          p_error:         params.error   ?? null,
+          p_error:         error,
           p_timestamp:     params.timestamp,
           p_input_tokens:  params.input_tokens  ?? 0,
           p_output_tokens: params.output_tokens ?? 0,
